@@ -6,13 +6,15 @@ from src.Models.MapDetail import MapDetail
 from src.Models.SearchParams import SearchParams
 from src.Models.SearchResponse import SearchResponse
 from config import BEATSAVER_BASE_URL
+from src.Services.RedisService import RedisService
 
 
 class BeatSaverService:
-    def __init__(self, http_client=None):
+    def __init__(self, redis_service: RedisService, http_client=None):
         if http_client is None:
             http_client = requests
         self.http_client = http_client
+        self.redis_service = redis_service
 
     def _get(self, endpoint: str, params: dict = None):
         url = f"{BEATSAVER_BASE_URL}/{endpoint}"
@@ -54,13 +56,12 @@ class BeatSaverService:
         else:
             response.raise_for_status()
 
-    def search_text(self, page: int, params: SearchParams) -> SearchResponse:
+    def search_text(self, page: int, params: SearchParams) -> SearchResponse or None:
         endpoint = f"search/text/{page}"
         params_dict = {k: v for k, v in params.__dict__.items() if v is not None}
         response_json = self._get(endpoint, params=params_dict)
         search_response = self._map_to_search_response(response_json)
         search_response.docs = [doc.filter_info() for doc in search_response.docs]
-
         for i, doc in enumerate(search_response.docs[:5]):
             download_link = doc["versions"][0]["downloadURL"]
             song_name = doc["metadata"]["songName"]
@@ -70,7 +71,13 @@ class BeatSaverService:
             song_author = re.sub(r'[^A-Za-z0-9 ]+', '', song_author)
 
             file_name = f"map_{song_name}_{song_author}.zip"
-            self.download_zip(download_link, file_name, params.q)
+
+            if not self.redis_service.is_song_downloaded(file_name):
+                self.download_zip(download_link, file_name, params.q)
+                self.redis_service.add_song(file_name)
+                print(f"{file_name} downloaded")
+            else:
+                print(f"{file_name} already downloaded")
 
         return search_response
 
@@ -79,3 +86,7 @@ class BeatSaverService:
         docs = [MapDetail(**doc) for doc in data.get('docs', [])]
         redirect = data.get('redirect')
         return SearchResponse(docs=docs, redirect=redirect)
+
+    def search_and_download_with_query(self, search_query):
+        search_params = SearchParams(q=search_query, sortOrder="Relevance", leaderboard="All")
+        return self.search_text(page=0, params=search_params)
